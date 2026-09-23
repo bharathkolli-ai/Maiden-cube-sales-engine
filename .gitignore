@@ -1,0 +1,9 @@
+.env
+.envcbhcode
+venv/
+__pycache__/
+stage1_output/
+scraped_output/
+scraped_output_indeed/
+scraped_output_linkedin/
+filtered_consultancies.json
