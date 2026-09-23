@@ -7,9 +7,9 @@ import os
 import json
 import re
 from crawl4ai import AsyncWebCrawler
-from anthropic import Anthropic
+from groq import Groq
 
-client = Anthropic()
+groq_client = Groq()
 
 REED_URLS = [
     "https://www.reed.co.uk/jobs/senior-software-engineer-jobs",
@@ -23,7 +23,6 @@ INDEED_URLS = [
     "https://uk.indeed.com/jobs?q=full+stack+developer&l=United+Kingdom",
 ]
 
-# Public LinkedIn job search endpoints (guest / search mode)
 LINKEDIN_URLS = [
     "https://www.linkedin.com/jobs/search?keywords=Generative%20AI&location=India",
     "https://www.linkedin.com/jobs/search?keywords=Senior%20Software%20Engineer&location=United%20Kingdom",
@@ -44,64 +43,11 @@ CONSULTANCY_KEYWORDS = [
 TOTAL_REQUESTS = 10
 DELAY_SECONDS = 3
 
-USE_MOCK_LLM = True  # Set to True if testing without consuming API credits
+USE_MOCK_LLM = False
 
 os.makedirs("stage1_output", exist_ok=True)
 
-
-def is_consultancy(company_name):
-    if not company_name:
-        return False, None
-    name_lower = company_name.lower()
-    if any(seed in name_lower for seed in CONSULTANCY_SEED_LIST):
-        return True, "seed_list"
-    if any(kw in name_lower for kw in CONSULTANCY_KEYWORDS):
-        return True, "keyword"
-    return False, None
-
-
-def extract_fields_mock(raw_text, source_url):
-    """Returns a mock payload matching the target screenshots."""
-    return {
-        "recruiter": {
-            "name": "Anjali Sharma",
-            "linkedin_profile": "https://linkedin.com/in/xxxxx",
-            "designation": "Senior Talent Acquisition Specialist",
-            "company": "Microsoft",
-            "location": "Hyderabad, India",
-            "professional_summary": "Hiring for AI, Data Engineering and Cloud roles"
-        },
-        "job_posting": {
-            "job_title": "Senior GenAI Engineer",
-            "technology_hiring_for": "Generative AI",
-            "technology_stack": [
-                "Python",
-                "CrewAI",
-                "LangGraph",
-                "Azure OpenAI",
-                "RAG",
-                "FastAPI"
-            ],
-            "experience_required": "5-8 Years",
-            "location": "Hyderabad",
-            "employment_type": "Full Time",
-            "number_of_openings": 15,
-            "salary": "Not Disclosed",
-            "posted_date": "2 Days Ago",
-            "job_description": "..."
-        },
-        "hiring_intelligence": {
-            "hiring_priority": "High",
-            "technology_focus": "Generative AI",
-            "recruitment_type": "Lateral Hiring",
-            "estimated_hiring_volume": "High",
-            "demand_score": 92
-        }
-    }
-
-
-def extract_fields_with_llm(raw_text, source_url):
-    prompt = f"""Extract and analyze the job and recruiter details from the scraped page content below.
+PROMPT_TEMPLATE = """Extract and analyze the job and recruiter details from the scraped page content below.
 Strictly return ONLY a valid raw JSON object (no markdown formatting, no ```json fences, no preamble, no commentary) matching this schema:
 
 {{
@@ -135,19 +81,80 @@ Strictly return ONLY a valid raw JSON object (no markdown formatting, no ```json
 }}
 
 Scraped Content:
-{raw_text[:6000]}
+{content}
 """
+
+
+def is_consultancy(company_name):
+    if not company_name:
+        return False, None
+    name_lower = company_name.lower()
+    if any(seed in name_lower for seed in CONSULTANCY_SEED_LIST):
+        return True, "seed_list"
+    if any(kw in name_lower for kw in CONSULTANCY_KEYWORDS):
+        return True, "keyword"
+    return False, None
+
+
+def extract_fields_mock(raw_text, source_url):
+    return {
+        "recruiter": {
+            "name": "Anjali Sharma",
+            "linkedin_profile": "https://linkedin.com/in/xxxxx",
+            "designation": "Senior Talent Acquisition Specialist",
+            "company": "Microsoft",
+            "location": "Hyderabad, India",
+            "professional_summary": "Hiring for AI, Data Engineering and Cloud roles"
+        },
+        "job_posting": {
+            "job_title": "Senior GenAI Engineer",
+            "technology_hiring_for": "Generative AI",
+            "technology_stack": ["Python", "CrewAI", "LangGraph", "Azure OpenAI", "RAG", "FastAPI"],
+            "experience_required": "5-8 Years",
+            "location": "Hyderabad",
+            "employment_type": "Full Time",
+            "number_of_openings": 15,
+            "salary": "Not Disclosed",
+            "posted_date": "2 Days Ago",
+            "job_description": "..."
+        },
+        "hiring_intelligence": {
+            "hiring_priority": "High",
+            "technology_focus": "Generative AI",
+            "recruitment_type": "Lateral Hiring",
+            "estimated_hiring_volume": "High",
+            "demand_score": 92
+        }
+    }
+
+
+# ============================================================
+# LLM PROVIDER — swap this function to change model/provider.
+# Everything else in the pipeline stays the same.
+# ============================================================
+def call_llm(prompt):
+    """
+    Currently uses Groq (openai/gpt-oss-120b).
+    To switch providers, replace the body of this function only —
+    it must return the raw text response from the model.
+    """
+    response = groq_client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        max_tokens=1200,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"}
+    )
+    return response.choices[0].message.content.strip()
+
+
+def extract_fields_with_llm(raw_text, source_url):
+    prompt = PROMPT_TEMPLATE.format(content=raw_text[:6000])
     try:
-        response = client.messages.create(
-            model="claude-3-7-sonnet-latest",
-            max_tokens=1200,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
+        text = call_llm(prompt)
         text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
         return json.loads(text)
     except Exception as e:
-        print(f"Error during Claude extraction: {e}")
+        print(f"Error during LLM extraction: {e}")
         return None
 
 
@@ -170,7 +177,6 @@ async def main():
         print(f"[{i}/{TOTAL_REQUESTS}] Scraping from {source.upper()}: {url}")
         content = await scrape_one(url)
 
-        # Skip failed anti-bot challenge pages or empty results
         if len(content) < 1500:
             print("Content too short or crawler blocked, skipping...")
             await asyncio.sleep(DELAY_SECONDS)
@@ -186,14 +192,9 @@ async def main():
             await asyncio.sleep(DELAY_SECONDS)
             continue
 
-        # Consultancy evaluation
-        company = (
-            extracted.get("recruiter", {}).get("company")
-            or ""
-        )
+        company = extracted.get("recruiter", {}).get("company") or ""
         matched, match_type = is_consultancy(company)
 
-        # Enrich root payload with crawl metadata
         extracted["source_platform"] = source
         extracted["source_url"] = url
         extracted["is_consultancy_match"] = matched
